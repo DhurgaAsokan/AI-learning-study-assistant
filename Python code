@@ -1,0 +1,697 @@
+# ============================================================
+# AI-POWERED LEARNING & PERSONALIZED STUDY ASSISTANT
+# IBM INTERNSHIP PROJECT
+# RAG + MEMORY + TOOL CALLING
+# ============================================================
+
+import os
+import json
+import re
+import gradio as gr
+
+from pypdf import PdfReader
+from google import genai
+
+
+# ============================================================
+# MEMORY
+# ============================================================
+
+MEMORY_FILE = "student_memory.json"
+
+
+def load_memory():
+
+    if os.path.exists(MEMORY_FILE):
+
+        with open(MEMORY_FILE, "r") as f:
+            return json.load(f)
+
+    return {
+        "name": "",
+        "subject": "",
+        "difficulty": "Medium",
+        "quiz_scores": [],
+        "weak_topics": []
+    }
+
+
+memory = load_memory()
+
+
+def save_memory():
+
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(memory, f, indent=4)
+
+
+# ============================================================
+# GLOBAL DOCUMENT TEXT
+# ============================================================
+
+document_text = ""
+
+
+# ============================================================
+# GEMINI CLIENT
+# ============================================================
+
+client = None
+
+
+def set_api_key(api_key):
+
+    global client
+
+    if not api_key:
+        return "❌ Please enter your Gemini API key."
+
+    try:
+
+        client = genai.Client(api_key=api_key)
+
+        return "✅ Gemini API connected successfully!"
+
+    except Exception as e:
+
+        return f"❌ API Error: {str(e)}"
+
+
+# ============================================================
+# PDF UPLOAD
+# ============================================================
+
+def upload_pdf(file):
+
+    global document_text
+
+    if file is None:
+
+        return "❌ Please upload a PDF."
+
+    try:
+
+        reader = PdfReader(file.name)
+
+        text = ""
+
+        for page in reader.pages:
+
+            page_text = page.extract_text()
+
+            if page_text:
+                text += page_text + "\n"
+
+        document_text = text
+
+        return (
+            f"✅ PDF uploaded successfully!\n\n"
+            f"Pages: {len(reader.pages)}\n"
+            f"Characters extracted: {len(text)}"
+        )
+
+    except Exception as e:
+
+        return f"❌ PDF Error: {str(e)}"
+
+
+# ============================================================
+# SIMPLE RAG RETRIEVAL
+# ============================================================
+
+def retrieve_context(question):
+
+    if not document_text:
+
+        return ""
+
+    question_words = [
+        word.lower()
+        for word in re.findall(r"\b\w+\b", question)
+        if len(word) > 2
+    ]
+
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        document_text
+    )
+
+    scored = []
+
+    for sentence in sentences:
+
+        sentence_lower = sentence.lower()
+
+        score = sum(
+            word in sentence_lower
+            for word in question_words
+        )
+
+        if score > 0:
+
+            scored.append(
+                (score, sentence)
+            )
+
+    scored.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    context = " ".join(
+        sentence
+        for score, sentence in scored[:15]
+    )
+
+    return context[:10000]
+
+
+# ============================================================
+# AI TUTOR
+# ============================================================
+
+def ask_ai(question):
+
+    if client is None:
+
+        return "❌ Please enter your Gemini API key first."
+
+    if not question:
+
+        return "❌ Please enter a question."
+
+    context = retrieve_context(question)
+
+    if context:
+
+        prompt = f"""
+You are an AI Learning Assistant.
+
+Answer the student's question using the
+study material provided below.
+
+STUDY MATERIAL:
+{context}
+
+STUDENT QUESTION:
+{question}
+
+Rules:
+1. Explain clearly.
+2. Use simple student-friendly language.
+3. Prefer the uploaded study material.
+4. If the answer is not present in the material,
+   clearly mention that.
+"""
+
+    else:
+
+        prompt = f"""
+You are an AI Learning Assistant.
+
+Student Question:
+{question}
+
+No relevant information was found in the
+uploaded study material.
+
+Provide a helpful educational explanation.
+"""
+
+    try:
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        return response.text
+
+    except Exception as e:
+
+        return f"❌ Gemini Error: {str(e)}"
+
+
+# ============================================================
+# QUIZ TOOL
+# ============================================================
+
+def generate_quiz(topic, difficulty, number):
+
+    if client is None:
+
+        return "❌ Please connect Gemini first."
+
+    if not topic:
+
+        topic = memory["subject"]
+
+    prompt = f"""
+Create {number} multiple-choice questions.
+
+Subject:
+{memory["subject"]}
+
+Topic:
+{topic}
+
+Difficulty:
+{difficulty}
+
+For every question provide:
+
+Question
+A.
+B.
+C.
+D.
+Correct Answer
+
+Make the questions educational and suitable
+for a college student.
+"""
+
+    try:
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        return response.text
+
+    except Exception as e:
+
+        return f"❌ Quiz Error: {str(e)}"
+
+
+# ============================================================
+# STUDY PLAN TOOL
+# ============================================================
+
+def create_study_plan(subject, days):
+
+    if client is None:
+
+        return "❌ Please connect Gemini first."
+
+    weak_topics = ", ".join(
+        memory["weak_topics"]
+    )
+
+    prompt = f"""
+Create a personalized {days}-day study plan.
+
+Student:
+{memory["name"]}
+
+Subject:
+{subject}
+
+Difficulty:
+{memory["difficulty"]}
+
+Weak Topics:
+{weak_topics}
+
+Create a practical plan.
+
+For every day include:
+- Topic
+- Learning activity
+- Practice activity
+- Revision activity
+"""
+
+    try:
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        return response.text
+
+    except Exception as e:
+
+        return f"❌ Study Plan Error: {str(e)}"
+
+
+# ============================================================
+# MEMORY FUNCTIONS
+# ============================================================
+
+def save_profile(name, subject, difficulty):
+
+    memory["name"] = name
+    memory["subject"] = subject
+    memory["difficulty"] = difficulty
+
+    save_memory()
+
+    return "✅ Student profile saved successfully!"
+
+
+def save_score(score):
+
+    memory["quiz_scores"].append(float(score))
+
+    save_memory()
+
+    if score >= 80:
+
+        return "🎉 Excellent performance!"
+
+    elif score >= 60:
+
+        return "👍 Good performance. Keep practicing!"
+
+    else:
+
+        return "⚠️ You need more revision."
+
+
+def add_weak_topic(topic):
+
+    if not topic:
+
+        return "❌ Enter a topic."
+
+    if topic not in memory["weak_topics"]:
+
+        memory["weak_topics"].append(topic)
+
+        save_memory()
+
+        return f"✅ '{topic}' added to weak topics."
+
+    return "ℹ️ Topic already exists."
+
+
+def show_progress():
+
+    scores = memory["quiz_scores"]
+
+    if scores:
+
+        average = sum(scores) / len(scores)
+
+    else:
+
+        average = 0
+
+    weak = ", ".join(
+        memory["weak_topics"]
+    )
+
+    return f"""
+## 📊 Learning Progress
+
+**Student:** {memory["name"] or "Not set"}
+
+**Subject:** {memory["subject"] or "Not set"}
+
+**Difficulty:** {memory["difficulty"]}
+
+**Quiz Attempts:** {len(scores)}
+
+**Average Score:** {average:.1f}%
+
+**Weak Topics:** {weak or "None"}
+
+**Quiz Scores:** {scores or "No scores yet"}
+"""
+
+
+# ============================================================
+# GRADIO INTERFACE
+# ============================================================
+
+with gr.Blocks(
+    title="AI Learning Assistant"
+) as app:
+
+    gr.Markdown(
+        """
+# 🎓 AI-Powered Learning & Personalized Study Assistant
+
+### IBM Internship Project
+
+**RAG + Memory + Tool Calling**
+
+Upload your study material, ask questions,
+generate quizzes and create personalized study plans.
+"""
+    )
+
+    # --------------------------------------------------------
+    # API
+    # --------------------------------------------------------
+
+    with gr.Tab("🔑 AI Connection"):
+
+        api_input = gr.Textbox(
+            label="Gemini API Key",
+            type="password",
+            placeholder="Enter your Gemini API key"
+        )
+
+        api_button = gr.Button(
+            "Connect Gemini"
+        )
+
+        api_status = gr.Textbox(
+            label="Status"
+        )
+
+        api_button.click(
+            set_api_key,
+            inputs=api_input,
+            outputs=api_status
+        )
+
+    # --------------------------------------------------------
+    # PROFILE
+    # --------------------------------------------------------
+
+    with gr.Tab("👤 Student Profile"):
+
+        name = gr.Textbox(
+            label="Student Name"
+        )
+
+        subject = gr.Textbox(
+            label="Current Subject"
+        )
+
+        difficulty = gr.Dropdown(
+            ["Easy", "Medium", "Hard"],
+            value="Medium",
+            label="Preferred Difficulty"
+        )
+
+        save_profile_button = gr.Button(
+            "💾 Save Profile"
+        )
+
+        profile_status = gr.Textbox(
+            label="Status"
+        )
+
+        save_profile_button.click(
+            save_profile,
+            inputs=[
+                name,
+                subject,
+                difficulty
+            ],
+            outputs=profile_status
+        )
+
+    # --------------------------------------------------------
+    # DOCUMENTS
+    # --------------------------------------------------------
+
+    with gr.Tab("📚 Study Materials"):
+
+        pdf = gr.File(
+            label="Upload PDF Study Material",
+            file_types=[".pdf"]
+        )
+
+        upload_button = gr.Button(
+            "📤 Upload PDF"
+        )
+
+        upload_status = gr.Textbox(
+            label="Document Status",
+            lines=4
+        )
+
+        upload_button.click(
+            upload_pdf,
+            inputs=pdf,
+            outputs=upload_status
+        )
+
+    # --------------------------------------------------------
+    # AI TUTOR
+    # --------------------------------------------------------
+
+    with gr.Tab("🤖 AI Tutor"):
+
+        question = gr.Textbox(
+            label="Ask your question",
+            placeholder="Example: Explain deadlock in simple terms.",
+            lines=3
+        )
+
+        ask_button = gr.Button(
+            "🤖 Ask AI"
+        )
+
+        answer = gr.Markdown()
+
+        ask_button.click(
+            ask_ai,
+            inputs=question,
+            outputs=answer
+        )
+
+    # --------------------------------------------------------
+    # QUIZ
+    # --------------------------------------------------------
+
+    with gr.Tab("📝 Quiz Generator"):
+
+        quiz_topic = gr.Textbox(
+            label="Quiz Topic"
+        )
+
+        quiz_difficulty = gr.Dropdown(
+            ["Easy", "Medium", "Hard"],
+            value="Medium",
+            label="Difficulty"
+        )
+
+        quiz_number = gr.Slider(
+            minimum=1,
+            maximum=10,
+            value=5,
+            step=1,
+            label="Number of Questions"
+        )
+
+        quiz_button = gr.Button(
+            "📝 Generate Quiz"
+        )
+
+        quiz_output = gr.Markdown()
+
+        quiz_button.click(
+            generate_quiz,
+            inputs=[
+                quiz_topic,
+                quiz_difficulty,
+                quiz_number
+            ],
+            outputs=quiz_output
+        )
+
+    # --------------------------------------------------------
+    # STUDY PLAN
+    # --------------------------------------------------------
+
+    with gr.Tab("📅 Study Plan"):
+
+        plan_subject = gr.Textbox(
+            label="Subject"
+        )
+
+        plan_days = gr.Slider(
+            minimum=1,
+            maximum=14,
+            value=7,
+            step=1,
+            label="Number of Days"
+        )
+
+        plan_button = gr.Button(
+            "📅 Create Study Plan"
+        )
+
+        plan_output = gr.Markdown()
+
+        plan_button.click(
+            create_study_plan,
+            inputs=[
+                plan_subject,
+                plan_days
+            ],
+            outputs=plan_output
+        )
+
+    # --------------------------------------------------------
+    # PROGRESS
+    # --------------------------------------------------------
+
+    with gr.Tab("📊 Progress & Memory"):
+
+        score = gr.Number(
+            label="Quiz Score (%)",
+            minimum=0,
+            maximum=100
+        )
+
+        score_button = gr.Button(
+            "💾 Save Score"
+        )
+
+        score_status = gr.Textbox()
+
+        score_button.click(
+            save_score,
+            inputs=score,
+            outputs=score_status
+        )
+
+        weak_topic = gr.Textbox(
+            label="Add Weak Topic"
+        )
+
+        weak_button = gr.Button(
+            "➕ Add Weak Topic"
+        )
+
+        weak_status = gr.Textbox()
+
+        weak_button.click(
+            add_weak_topic,
+            inputs=weak_topic,
+            outputs=weak_status
+        )
+
+        progress_button = gr.Button(
+            "📊 Show My Progress"
+        )
+
+        progress_output = gr.Markdown()
+
+        progress_button.click(
+            show_progress,
+            outputs=progress_output
+        )
+
+
+# ============================================================
+# LAUNCH
+# ============================================================
+
+print("✅ AI Learning Assistant created successfully!")
+print("🚀 Starting application...")
+print("🌐 Gradio will provide the application link below.")
+
+app.launch(
+    share=True,
+    debug=False
+)
